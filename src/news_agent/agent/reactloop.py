@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field, ValidationError
 from news_agent.llm.ollama_client import generate
 from news_agent.tools.registry import get_tool_descriptions, get_tool_registry
 
+from news_agent.prompts.abstract import SYSTEM_PROMPT as ABSTRACT_PROMPT
+from news_agent.prompts.structured import SYSTEM_PROMPT as STRUCTURED_PROMPT
+from news_agent.prompts.chainofthought import SYSTEM_PROMPT as COT_PROMPT
 
 class ReActStep(BaseModel):
     kind: str = Field(description="Either 'action' or 'final'")
@@ -45,17 +48,32 @@ class ReActResult:
     trace: str
     tool_calls: int
 
+def get_style_prompt(prompt_style: str) -> str:
+    mapping = {
+        "abstract": ABSTRACT_PROMPT,
+        "structured": STRUCTURED_PROMPT,
+        "chainofthought": COT_PROMPT,
+    }
+    return mapping.get(prompt_style, ABSTRACT_PROMPT)
 
-def build_react_system_prompt() -> str:
+
+def build_react_system_prompt(prompt_style: str) -> str:
     tools_text = get_tool_descriptions()
-    return f"""You are a local news research agent working in a ReAct loop.
+    style_prompt = get_style_prompt(prompt_style)
+
+    return f"""{style_prompt}
+
+You are also working inside a ReAct-style tool loop.
 
 Available tools:
 {tools_text}
 
 You must return exactly one JSON object per turn.
 
-Rules:
+Critical rules:
+- NEVER treat the number of articles or a raw list of titles as the final answer.
+- If you have article results, you MUST call summarizearticles BEFORE returning a final answer.
+- Only return kind="final" AFTER summarizearticles has been used (unless no articles were found).
 - If you need to use a tool, return kind="action".
 - If you have enough information to answer the user, return kind="final".
 - Use only the listed tool names.
@@ -67,7 +85,7 @@ Rules:
 Tool usage guidance:
 - Use purifyquery when the user's request is vague or messy.
 - Use searchnews when you need current articles.
-- Use summarizearticles after you have article results.
+- After you have articles from searchnews, call summarizearticles with the relevant query.
 
 For kind="action":
 - fill thought
@@ -77,7 +95,7 @@ For kind="action":
 
 For kind="final":
 - fill thought
-- fill final_answer
+- fill final_answer with a short, helpful answer
 - leave tool_name and tool_input as empty strings
 """
 
@@ -143,10 +161,11 @@ def parse_step(raw_text: str) -> ReActStep:
 def run_react_loop(
     user_input: str,
     model: str,
+    prompt_style: str = "abstract",
     max_iterations: int = 8,
     temperature: float = 0.0,
 ) -> ReActResult:
-    system_prompt = build_react_system_prompt()
+    system_prompt = build_react_system_prompt(prompt_style)
 
     history_parts = [
         f"User request: {user_input}",
@@ -179,8 +198,25 @@ def run_react_loop(
             continue
 
         if step.kind == "final":
+            answer = step.final_answer.strip()
+            if len(answer) <= 3 and context.get("last_articles") and not context.get("last_summary"):
+                observation = call_tool(
+                    tool_name="summarizearticles",
+                    tool_input=context.get("last_query", user_input),
+                    model=model,
+                    context=context,
+                )
+                tool_calls += 1
+                trace_lines.append("Observation: auto-summarize fallback")
+                trace_lines.append(f"Observation: {observation}")
+                return ReActResult(
+                    final_answer=observation,
+                    trace="\n".join(trace_lines),
+                    tool_calls=tool_calls,
+                )
+
             return ReActResult(
-                final_answer=step.final_answer,
+                final_answer=answer or "I could not generate a useful final answer.",
                 trace="\n".join(trace_lines),
                 tool_calls=tool_calls,
             )
@@ -198,7 +234,12 @@ def run_react_loop(
         history_parts.append(f"Observation: {observation}")
         trace_lines.append(f"Observation: {observation}")
 
-    fallback = context.get("last_summary") or "I could not complete the loop within the maximum number of iterations."
+    raw_final = context.get("last_summary")
+    if raw_final:
+        fallback = raw_final
+    else:
+        fallback = "I could not complete the loop within the maximum number of iterations."
+
     return ReActResult(
         final_answer=fallback,
         trace="\n".join(trace_lines),
