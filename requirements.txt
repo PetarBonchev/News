@@ -3,6 +3,7 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.13.0
 certifi==2026.5.20
+charset-normalizer==3.4.7
 colorama==0.4.6
 greenlet==3.5.1
 h11==0.16.0
@@ -22,6 +23,7 @@ Pygments==2.20.0
 PyMySQL==1.2.0
 pytest==9.1.0
 python-dotenv==1.2.2
+requests==2.34.2
 rich==15.0.0
 ruff==0.15.17
 shellingham==1.5.4
@@ -29,3 +31,4 @@ SQLAlchemy==2.0.50
 typer==0.26.7
 typing-inspection==0.4.2
 typing_extensions==4.15.0
+urllib3==2.7.0
