@@ -15,6 +15,7 @@ def generate(
     prompt: str,
     system: str = "",
     temperature: float = 0.2,
+    response_format: dict | None = None,
 ) -> str:
     payload = {
         "model": model,
@@ -25,6 +26,9 @@ def generate(
             "temperature": temperature,
         },
     }
+
+    if response_format is not None:
+        payload["format"] = response_format
 
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
