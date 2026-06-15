@@ -10,7 +10,7 @@ from news_agent.config import DEFAULT_MODEL
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("query", nargs="?", default="What is happening in Ukraine?")
+    parser.add_argument("query", nargs="?", default="What happened at the latest F1 grand prix?")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.0)
