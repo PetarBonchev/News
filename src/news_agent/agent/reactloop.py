@@ -4,41 +4,47 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field, ValidationError
 
 from news_agent.llm.ollama_client import generate
+from news_agent.tools.filter import filter_articles
 from news_agent.tools.registry import get_tool_descriptions, get_tool_registry
 
 from news_agent.prompts.abstract import SYSTEM_PROMPT as ABSTRACT_PROMPT
 from news_agent.prompts.structured import SYSTEM_PROMPT as STRUCTURED_PROMPT
 from news_agent.prompts.chainofthought import SYSTEM_PROMPT as COT_PROMPT
 
+class SearchParams(BaseModel):
+    q: str = Field(default="")
+    section: str = Field(default="")
+    from_days: int = Field(default=0)
+
+
 class ReActStep(BaseModel):
     kind: str = Field(description="Either 'action' or 'final'")
     thought: str = Field(default="")
     tool_name: str = Field(default="")
-    tool_input: str = Field(default="")
+    query_text: str = Field(default="", description="Plain text input for purifyquery and summarizearticles")
+    search_params: SearchParams = Field(default_factory=SearchParams, description="Structured input for searchnews")
     final_answer: str = Field(default="")
 
 
 REACT_STEP_SCHEMA = {
     "type": "object",
     "properties": {
-        "kind": {
-            "type": "string",
-            "enum": ["action", "final"],
+        "kind": {"type": "string", "enum": ["action", "final"]},
+        "thought": {"type": "string"},
+        "tool_name": {"type": "string"},
+        "query_text": {"type": "string"},
+        "search_params": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string"},
+                "section": {"type": "string"},
+                "from_days": {"type": "integer"},
+            },
+            "required": ["q"],
         },
-        "thought": {
-            "type": "string",
-        },
-        "tool_name": {
-            "type": "string",
-        },
-        "tool_input": {
-            "type": "string",
-        },
-        "final_answer": {
-            "type": "string",
-        },
+        "final_answer": {"type": "string"},
     },
-    "required": ["kind", "thought", "tool_name", "tool_input", "final_answer"],
+    "required": ["kind", "thought", "tool_name", "query_text", "search_params", "final_answer"],
 }
 
 
@@ -82,21 +88,28 @@ Critical rules:
 - Do not wrap JSON in markdown.
 - Do not output any text outside the JSON object.
 
-Tool usage guidance:
-- Use purifyquery when the user's request is vague or messy.
-- Use searchnews when you need current articles.
-- After you have articles from searchnews, call summarizearticles with the relevant query.
+Tool sequence — follow this order every time:
+1. purifyquery — only if the user input is vague or conversational.
+   Set query_text to the raw user question. Leave search_params empty.
+   Example: query_text="what's going on with the war in ukraine lately"
+   Returns a clean query. Use it as search_params.q in step 2.
 
-For kind="action":
-- fill thought
-- fill tool_name
-- fill tool_input
-- leave final_answer as empty string
+2. searchnews — search for articles.
+   Set search_params.q (required), search_params.section (optional), search_params.from_days (optional).
+   Example: search_params={{"q": "Ukraine Russia war", "section": "world", "from_days": 7}}
+   The observation will tell you how many relevant articles were found.
+   - If relevant articles were found: proceed to step 3.
+   - If 0 relevant articles: call searchnews again with a different q, section, or from_days.
+   - Do NOT call searchnews again with the exact same search_params.q.
 
-For kind="final":
-- fill thought
-- fill final_answer with a short, helpful answer
-- leave tool_name and tool_input as empty strings
+3. summarizearticles — call this once you have relevant articles.
+   Set query_text to the user's original question. Leave search_params empty.
+   Example: query_text="What is happening in Ukraine?"
+
+4. Return kind="final" with final_answer set to the summary from step 3.
+
+For kind="action": fill thought, tool_name, and either query_text or search_params. Set final_answer to "".
+For kind="final": fill thought, final_answer. Set tool_name and query_text to "" and search_params to empty.
 """
 
 
@@ -112,26 +125,36 @@ def format_articles_for_observation(articles: list[dict], from_cache: bool) -> s
     return "\n".join(lines)
 
 
-def call_tool(tool_name: str, tool_input: str, model: str, context: dict) -> str:
+def call_tool(step: ReActStep, model: str, context: dict) -> str:
     registry = get_tool_registry()
+    tool_name = step.tool_name
 
     if tool_name not in registry:
         return f"Unknown tool: {tool_name}"
 
     if tool_name == "purifyquery":
-        result = registry[tool_name].fn(tool_input, model=model)
+        result = registry[tool_name].fn(step.query_text, model=model)
         context["last_query"] = result
-        return result
+        return f"Purified query: {result}\nNext: call searchnews with this query."
 
     if tool_name == "searchnews":
-        articles, from_cache = registry[tool_name].fn(tool_input)
-        context["last_query"] = tool_input
-        context["last_articles"] = articles
-        return format_articles_for_observation(articles, from_cache)
+        params = step.search_params
+        tool_input_str = json.dumps({"q": params.q, "section": params.section, "from_days": params.from_days})
+        articles, from_cache = registry[tool_name].fn(tool_input_str)
+        query = context.get("last_query") or params.q
+        context["last_query"] = query
+        relevant, dropped = filter_articles(articles, query=query, model=model)
+        context["last_articles"] = relevant
+        observation = format_articles_for_observation(relevant, from_cache)
+        if relevant:
+            observation += f"\n{dropped} irrelevant articles filtered out. Proceed to summarizearticles."
+        else:
+            observation += "\n0 relevant articles found. Call searchnews again with a different query or section."
+        return observation
 
     if tool_name == "summarizearticles":
         articles = context.get("last_articles")
-        query = context.get("last_query", tool_input)
+        query = context.get("last_query") or step.query_text
 
         if not articles:
             return "No articles available. Use searchnews first."
@@ -148,12 +171,15 @@ def parse_step(raw_text: str) -> ReActStep:
     step = ReActStep.model_validate(data)
 
     if step.kind == "action":
-        if not step.tool_name or not step.tool_input:
-            raise ValueError("Action step must include tool_name and tool_input.")
+        if not step.tool_name:
+            raise ValueError("Action step must include tool_name.")
+        if step.tool_name == "searchnews" and not step.search_params.q:
+            raise ValueError("searchnews requires search_params.q to be set.")
+        if step.tool_name in ("purifyquery", "summarizearticles") and not step.query_text:
+            raise ValueError(f"{step.tool_name} requires query_text to be set.")
 
-    if step.kind == "final":
-        if not step.final_answer:
-            raise ValueError("Final step must include final_answer.")
+    if step.kind == "final" and not step.final_answer:
+        raise ValueError("Final step must include final_answer.")
 
     return step
 
@@ -173,6 +199,7 @@ def run_react_loop(
         "Return the next step as JSON.",
     ]
     context: dict = {}
+    seen_calls: set[tuple[str, str]] = set()
     trace_lines: list[str] = []
     tool_calls = 0
 
@@ -200,20 +227,11 @@ def run_react_loop(
         if step.kind == "final":
             answer = step.final_answer.strip()
             if len(answer) <= 3 and context.get("last_articles") and not context.get("last_summary"):
-                observation = call_tool(
-                    tool_name="summarizearticles",
-                    tool_input=context.get("last_query", user_input),
-                    model=model,
-                    context=context,
-                )
+                fallback_step = ReActStep(kind="action", tool_name="summarizearticles", query_text=context.get("last_query", user_input))
+                observation = call_tool(fallback_step, model, context)
                 tool_calls += 1
-                trace_lines.append("Observation: auto-summarize fallback")
-                trace_lines.append(f"Observation: {observation}")
-                return ReActResult(
-                    final_answer=observation,
-                    trace="\n".join(trace_lines),
-                    tool_calls=tool_calls,
-                )
+                trace_lines.append(f"Observation: [auto-summarize fallback]\n{observation}")
+                return ReActResult(final_answer=observation, trace="\n".join(trace_lines), tool_calls=tool_calls)
 
             return ReActResult(
                 final_answer=answer or "I could not generate a useful final answer.",
@@ -221,16 +239,29 @@ def run_react_loop(
                 tool_calls=tool_calls,
             )
 
-        observation = call_tool(
-            tool_name=step.tool_name,
-            tool_input=step.tool_input,
-            model=model,
-            context=context,
-        )
+        call_key = (step.tool_name, step.search_params.q if step.tool_name == "searchnews" else step.query_text)
+        if call_key in seen_calls:
+            if step.tool_name == "purifyquery" and context.get("last_query"):
+                observation = f"Query already purified: {context['last_query']}. Now call searchnews with this query."
+            elif step.tool_name == "searchnews" and context.get("last_articles"):
+                fallback_step = ReActStep(kind="action", tool_name="summarizearticles", query_text=context.get("last_query", user_input))
+                observation = call_tool(fallback_step, model, context)
+                tool_calls += 1
+                trace_lines.append(f"Observation: {observation}")
+                return ReActResult(final_answer=observation, trace="\n".join(trace_lines), tool_calls=tool_calls)
+            else:
+                observation = f"You already called '{step.tool_name}' with that input. Try a different approach."
+            history_parts.append(f"Observation: {observation}")
+            trace_lines.append(f"Observation: {observation}")
+            continue
+
+        seen_calls.add(call_key)
+        observation = call_tool(step, model, context)
         tool_calls += 1
 
+        tool_input_display = step.search_params.q if step.tool_name == "searchnews" else step.query_text
         history_parts.append(f"Tool used: {step.tool_name}")
-        history_parts.append(f"Tool input: {step.tool_input}")
+        history_parts.append(f"Tool input: {tool_input_display}")
         history_parts.append(f"Observation: {observation}")
         trace_lines.append(f"Observation: {observation}")
 

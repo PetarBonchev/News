@@ -17,17 +17,35 @@ def get_tool_registry() -> dict[str, ToolSpec]:
     return {
         "purifyquery": ToolSpec(
             name="purifyquery",
-            description="Convert vague raw user input into a short clean news search query.",
+            description=(
+                "Rewrites a vague or conversational user request into a short, precise search query. "
+                "tool_input: plain text — the raw user question. "
+                'Example: tool_input="what is going on with the war in ukraine lately" '
+                "returns: Ukraine Russia war 2026"
+            ),
             fn=purify_query,
         ),
         "searchnews": ToolSpec(
             name="searchnews",
-            description="Search news articles using the Guardian-backed cache and return normalized article records.",
+            description=(
+                "Searches The Guardian for recent news articles. "
+                "tool_input: a JSON object with fields: "
+                "q (required, string), "
+                "section (optional — one of: world, politics, business, technology, science, "
+                "environment, sport, culture, us-news, uk-news, australia-news, global-development), "
+                "from_days (optional, integer — limit to articles from the last N days). "
+                'Example: {"q": "Ukraine Russia war", "section": "world", "from_days": 7}. '
+                "Returns up to 8 articles with title, date, url, and snippet."
+            ),
             fn=search_news,
         ),
         "summarizearticles": ToolSpec(
             name="summarizearticles",
-            description="Summarize a list of articles into a structured briefing.",
+            description=(
+                "Synthesizes the articles from the last searchnews call into a structured briefing. "
+                "tool_input: the user's original question as plain text. "
+                "Returns a briefing with: key developments, main actors, contradictions, open questions."
+            ),
             fn=summarize_articles,
         ),
     }
