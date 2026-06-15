@@ -115,8 +115,6 @@ def search_single_query(
     if not _is_valid_query(query):
         return [], False
 
-    # Normalize cache key so single-quote and double-quote representations match.
-    # order_by is part of the key so 'newest' and 'relevance' results cache separately.
     cache_key = json.dumps({"query": query, "section": section, "order_by": order_by}, sort_keys=True)
 
     with SessionLocal() as session:

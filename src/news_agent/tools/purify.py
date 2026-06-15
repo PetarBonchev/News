@@ -58,14 +58,12 @@ def _parse_queries(raw: str) -> list[str]:
     """Parse the model output into a list of query strings, tolerating common mistakes."""
     stripped = raw.strip()
 
-    # Strip accidental markdown fences.
     if stripped.startswith("```"):
         stripped = stripped.strip("`").lstrip("json").strip()
 
     try:
         data = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
-        # Fall back to treating the whole output as a single query.
         cleaned = stripped.strip().strip('"')
         return [cleaned] if cleaned else []
 
