@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 
+from news_agent.debug_log import debug
 from news_agent.llm.ollama_client import generate
 from news_agent.tools.filter import filter_articles
 from news_agent.tools.guardian import parse_search_input
@@ -126,8 +127,16 @@ Typical flow:
      you could not find articles on the topic.
 4. After summarizearticles, return kind="final" with its output as final_answer.
 
+Your goal is ALWAYS to summarize and answer the user. Summarizing the articles you have is almost
+always the right move — do your best with what you found, even if it only partially answers the
+question. Summarize partial or imperfect results rather than searching endlessly.
+Only fall back to suggestrequery + searchnews if summarizearticles genuinely cannot say anything about
+the question (the articles are entirely off-topic). When that happens, get better articles, then
+summarize again — do not give up on summarizing.
+
 You are in control: you may call searchnews more than once with different queries. Judge relevance
-yourself — do not summarize off-topic articles, and do not invent an answer when nothing fits.
+yourself — do not summarize completely off-topic articles, and do not invent facts that are not in
+the articles. But when you have anything on-topic, summarize it and answer.
 You get a limited number of searches; if searchnews reports the search limit is reached, stop searching
 and give an honest final answer.
 
@@ -154,6 +163,14 @@ def format_articles_for_observation(articles: list[dict], from_cache: bool) -> s
 
 
 def call_tool(tool_name: str, tool_input: str, model: str, context: dict) -> str:
+    """Run a tool, logging its input and output when DEBUG_LOGS is enabled."""
+    debug(f"tool '{tool_name}' input", tool_input)
+    observation = _dispatch_tool(tool_name, tool_input, model, context)
+    debug(f"tool '{tool_name}' output", observation)
+    return observation
+
+
+def _dispatch_tool(tool_name: str, tool_input: str, model: str, context: dict) -> str:
     registry = get_tool_registry()
 
     if tool_name not in registry:
@@ -185,13 +202,20 @@ def call_tool(tool_name: str, tool_input: str, model: str, context: dict) -> str
         try:
             params = parse_search_input(tool_input)
         except ValueError as e:
-            return str(e)
+            return (
+                f"{e}\nYour searchnews input was not valid JSON. Do NOT retry the same input. "
+                "Call purifyquery (or suggestrequery) to generate a fresh query, then pass it to "
+                "searchnews. Remember: never put double-quote characters inside a query string."
+            )
 
         record_tried_queries(context, params["q"])
         articles, from_cache = registry[tool_name].fn(tool_input)
+        debug("searchnews queries", params["q"])
+        debug("searchnews fetched", f"{len(articles)} articles (from_cache={from_cache})")
         query = context.get("user_input", "")
         relevant, dropped_titles, coverage = filter_articles(articles, query=query, model=model)
         accumulate_articles(context, relevant)
+        debug("searchnews coverage", f"{coverage} | kept {len(relevant)}, dropped {len(dropped_titles)}")
 
         observation = format_articles_for_observation(context["last_articles"], from_cache)
         observation += f"\nCoverage: {coverage}. {len(dropped_titles)} articles filtered out as irrelevant."

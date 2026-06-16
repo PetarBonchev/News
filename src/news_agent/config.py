@@ -13,5 +13,8 @@ DEFAULT_PROMPTS = os.getenv("DEFAULT_PROMPTS", "abstract")
 DEFAULT_NUM_AGENTS = int(os.getenv("DEFAULT_NUM_AGENTS", "1"))
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.2"))
 
+# Enable verbose per-tool debug logging (input/output of each tool call).
+DEBUG_LOGS = os.getenv("DEBUG_LOGS", "false").strip().lower() in ("1", "true", "yes", "on")
+
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")

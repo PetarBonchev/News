@@ -82,7 +82,9 @@ def get_tool_registry() -> dict[str, ToolSpec]:
                 "  Output — a briefing with four sections: Key developments, Main actors,\n"
                 "           Contradictions or uncertainties, Open questions.\n"
                 "           Followed by a Sources block with each article's title, date, and URL.\n"
-                "  Call this once you have relevant articles. Do not call it if 0 were found.\n"
+                "  Call this whenever you have any on-topic articles — do your best to summarize and answer,\n"
+                "  even from partial results. Only fall back to suggestrequery + searchnews if the articles\n"
+                "  are entirely off-topic and no briefing is possible.\n"
                 "  Example:\n"
                 '    tool_input: "Who won the NBA finals?"\n'
                 "    output: Key developments\n"

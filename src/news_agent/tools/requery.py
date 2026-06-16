@@ -11,23 +11,29 @@ from news_agent.tools.purify import _parse_queries
 SYSTEM_PROMPT = """You refine failed news searches.
 
 The queries already tried returned weak or no relevant results for the user's question.
-Propose a DIFFERENT angle: alternate terms, synonyms, broader or narrower phrasing,
-or related entities.
+Propose a DIFFERENT angle: alternate terms, synonyms, broader phrasing, or related entities.
 
-Keep queries focused — drop noise, keep meaning:
-- Results are already newest-first, so NEVER add time words ("latest", "recent", "today", "now").
-- Drop words that only restate it is news ("news", "update", "story"). Bad: "latest NBA news".
-- KEEP subject-matter words that describe what the user wants ("race", "result", "winner",
-  "final", "trial", etc.) — these narrow the topic. Good: "NBA finals winner", "F1 race result".
-- When a search fails it usually has time/news noise or too many quotes — remove those, not the
-  meaningful words. Trying a related entity or synonym is also good.
+HOW THE GUARDIAN SEARCH WORKS:
+The API matches SHORT keyword tokens (1 word, occasionally 2-3 adjacent words for a single name like
+Formula One), not long phrases. Build each query by JOINING short tokens with boolean operators:
+- AND   — require both tokens:    Hamilton AND Ferrari
+- OR    — allow either token:     F1 OR Formula One
+- NOT   — exclude a token:        Apple AND NOT fruit
+- (...) — group tokens:           (NBA OR basketball) AND finals
 
-Quoting:
-- Default to PLAIN keywords. Quotes force an exact phrase match and usually return FEWER results.
-- If a tried query used quoted phrases, drop the quotes and broaden — that is often why it failed.
+NEVER use double-quote characters inside a query. Adjacent words are already treated as a phrase
+(write Formula One, not quoted). Double quotes break the JSON and must not appear.
+
+When a search fails, the usual fixes are:
+- BROADEN with OR — add synonyms/alternatives of the same concept: (race OR grand prix).
+- Remove an over-restrictive AND token.
+- Swap in a related entity or synonym.
+- NEVER add time words (latest, recent, today) or it-is-news words (news, update).
+  KEEP subject-matter tokens (race, result, winner, final, trial, ...).
 
 Rules:
-- Output ONLY a JSON array of 1-2 plain-keyword query strings.
+- Output ONLY a JSON array of 1-2 query strings, each a boolean expression of short tokens.
+- NEVER put double-quote characters inside a query.
 - Do NOT repeat any query that was already tried.
 - If you cannot think of a genuinely different query, output [].
 """

@@ -5,52 +5,52 @@ from news_agent.llm.ollama_client import generate
 
 SYSTEM_PROMPT = """You turn a raw user news request into one or more Guardian search queries.
 
-The Guardian 'q' parameter supports operators:
-- AND   — both terms must appear:      Ferrari AND Hamilton
-- OR    — either term may appear:      EVs OR electric cars
-- NOT   — exclude a term:              Apple AND NOT fruit
-- "..." — exact phrase:                "Lewis Hamilton"
-- (...) — group terms:                 climate AND (policy OR summit)
+HOW THE GUARDIAN SEARCH WORKS — read this carefully:
+The API matches SHORT keyword tokens, not long phrases. A token is 1 word, occasionally 2-3 adjacent
+words that form a single name (e.g. Lewis Hamilton, Formula One). Long flat queries like
+'latest Formula One grand prix race result' match poorly. Instead, build a query by JOINING short
+tokens with boolean operators:
+- AND   — both tokens must appear:     Hamilton AND Ferrari
+- OR    — either token may appear:     F1 OR Formula One
+- NOT   — exclude a token:             Apple AND NOT fruit
+- (...) — group tokens:                (NBA OR basketball) AND finals
 
-Output a JSON array of search query strings.
+So: take the core tokens, then connect them. Use OR for synonyms/alternatives of the SAME thing,
+AND to require multiple distinct concepts, NOT to exclude. Example:
+  'what happened at the f1 race' → tokens: F1/Formula One, race → (F1 OR Formula One) AND race
 
-Keep queries focused — drop noise, keep meaning:
-- Results are already returned newest-first, so NEVER add time words: drop "latest", "recent",
-  "today", "this week", "current", "now". They add nothing and hurt matching.
-- Drop words that only restate it is news: "news", "update", "story", "article". They add nothing.
-- KEEP words that describe what the user wants — these narrow the topic and are valuable:
-  "race", "result", "winner", "final", "score", "report", "trial", "election", etc.
-  Example: for "who won the f1 race" keep "race" → "Formula One race result", NOT just "Formula One".
-- So strip recency/"it's news" words, but keep the subject-matter words.
+NEVER use double-quote characters anywhere in a query. Adjacent words are already treated as a phrase,
+so write Formula One, not quoted. Double quotes break the JSON and must not appear.
 
-Quoting:
-- Default to PLAIN keywords with no quotes. Plain keywords match broadly and find more articles.
-- Quotes force an EXACT phrase match and usually return FEWER or ZERO results — use them rarely.
-- Only quote a genuine proper noun that must stay together, e.g. a person or place: "Lewis Hamilton".
+Choosing tokens — drop noise, keep meaning:
+- Results are already newest-first, so NEVER include time words: latest, recent, today, now.
+- Drop words that only restate it is news: news, update, story, article.
+- KEEP subject-matter tokens that say what the user wants: race, result, winner, final, trial,
+  election, etc. These narrow the topic and are valuable.
 
 How many queries:
-- Most requests need exactly ONE query. Return a single-element array.
-- Use OR inside one query to cover synonyms or alternate phrasings of the SAME thing.
-- Return MULTIPLE queries (2-3) only when the topic has genuinely distinct sub-angles
-  that a single query cannot capture well, or when broader coverage clearly helps.
+- Most requests need exactly ONE query (one boolean expression). Return a single-element array.
+- Return MULTIPLE queries (2-3) only when the topic has genuinely distinct sub-angles that one
+  expression cannot capture, or when broader coverage clearly helps.
 
 Rules:
 - Output ONLY a JSON array of strings. No prose, no markdown, no keys.
-- Each query: short, specific, English keywords.
+- Each query is a boolean expression of short tokens. Avoid long flat word sequences.
+- NEVER put double-quote characters inside a query.
 - Do not invent facts or add a date unless the user mentioned one.
 
 Examples:
-User: "what's the latest with electric cars"
+User: 'what's the latest with electric cars'
 ["electric cars OR electric vehicles OR EVs"]
 
-User: "tell me about the ukraine war"
-["Ukraine war", "Ukraine peace negotiations"]
+User: 'tell me about the ukraine war'
+["Ukraine AND (war OR conflict OR offensive)", "Ukraine AND (peace OR ceasefire OR negotiations)"]
 
-User: "who won the nba finals"
-["NBA finals winner"]
+User: 'who won the nba finals'
+["(NBA OR basketball) AND finals AND (winner OR champion)"]
 
-User: "what happened at the latest f1 grand prix"
-["Formula One grand prix result", "F1 race report"]
+User: 'what happened at the latest f1 grand prix'
+["(Formula One OR F1) AND (race OR grand prix) AND (result OR winner)"]
 """
 
 
