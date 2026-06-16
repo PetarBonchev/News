@@ -205,7 +205,7 @@ def _dispatch_tool(tool_name: str, tool_input: str, model: str, context: dict) -
             return (
                 f"{e}\nYour searchnews input was not valid JSON. Do NOT retry the same input. "
                 "Call purifyquery (or suggestrequery) to generate a fresh query, then pass it to "
-                "searchnews. Remember: never put double-quote characters inside a query string."
+                "searchnews."
             )
 
         record_tried_queries(context, params["q"])
