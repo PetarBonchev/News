@@ -118,27 +118,26 @@ Typical flow:
 2. searchnews — run those queries. It filters the results for relevance and returns the relevant
    articles plus a coverage verdict (good / partial / none). Articles you find are KEPT across searches.
 3. YOU judge the result:
-   - If you have ANY relevant articles (coverage good or partial) → call summarizearticles. Even one
-     on-topic article is enough to answer; do not keep searching just because coverage is "partial".
+   - If you have ANY relevant articles (coverage good or partial) → IMMEDIATELY call summarizearticles.
+     Even one on-topic article is enough to answer; do NOT keep searching beyond this point.
    - Only if coverage is "none" (zero relevant articles found so far) → call suggestrequery to get
      better queries, then searchnews again. Try a different section if it helps. On your LAST search,
      if you still have nothing, use order_by="relevance" to prioritise topical matches over recency.
    - If coverage stays "none" after a few tries → return kind="final" with an honest answer saying
-     you could not find articles on the topic.
+     you could not find articles on the topic. NEVER keep searching endlessly.
 4. After summarizearticles, return kind="final" with its output as final_answer.
 
-Your goal is ALWAYS to summarize and answer the user. Summarizing the articles you have is almost
-always the right move — do your best with what you found, even if it only partially answers the
-question. Summarize partial or imperfect results rather than searching endlessly.
-Only fall back to suggestrequery + searchnews if summarizearticles genuinely cannot say anything about
-the question (the articles are entirely off-topic). When that happens, get better articles, then
-summarize again — do not give up on summarizing.
+CRITICAL: Your goal is ALWAYS to finalize with an answer. Summarizing is the natural end state.
+- Every iteration where you have articles → summarize that iteration.
+- Never search multiple times if you already have relevant articles.
+- If coverage="good" or "partial", you have won — call summarizearticles immediately.
+- Do your best with what you found, even if partial. Summarizing partial results is correct.
+- If you've had 2+ searches with no findings, stop wasting turns — return final with "no articles found".
 
 You are in control: you may call searchnews more than once with different queries. Judge relevance
-yourself — do not summarize completely off-topic articles, and do not invent facts that are not in
-the articles. But when you have anything on-topic, summarize it and answer.
-You get a limited number of searches; if searchnews reports the search limit is reached, stop searching
-and give an honest final answer.
+yourself — do not summarize completely off-topic articles, and do not invent facts not in the articles.
+But when you have anything on-topic, summarize it and answer. You get a limited number of searches;
+if searchnews reports the search limit is reached, stop searching and finalize.
 
 For kind="action": fill thought, tool_name, tool_input. Leave final_answer "".
 For kind="final": fill thought and final_answer. Leave tool_name and tool_input "".
@@ -147,6 +146,7 @@ Rules:
 - Never return a real briefing as final_answer before summarizearticles has run.
 - Never invent tool results or facts not present in the articles.
 - Output only the JSON object — no markdown, no text outside it.
+- NEVER loop: search → search → search. Search once, if coverage is good/partial, summarize immediately.
 """
 
 
@@ -177,7 +177,15 @@ def _dispatch_tool(tool_name: str, tool_input: str, model: str, context: dict) -
         return f"Unknown tool: {tool_name}"
 
     if tool_name == "purifyquery":
+        try:
+            parsed = json.loads(tool_input)
+            if isinstance(parsed, list):
+                tool_input = " ".join(str(q) for q in parsed)
+        except (json.JSONDecodeError, ValueError):
+            pass
         queries = registry[tool_name].fn(tool_input, model=model)
+        context["purify_count"] = context.get("purify_count", 0) + 1
+        context["last_purified_queries"] = queries
         return f"Purified into search queries: {json.dumps(queries)}"
 
     if tool_name == "suggestrequery":
@@ -231,7 +239,7 @@ def _dispatch_tool(tool_name: str, tool_input: str, model: str, context: dict) -
                     "\nNo relevant articles yet. Call suggestrequery to get better queries, then searchnews again."
                 )
         else:
-            observation += "\nYou have relevant articles. Call summarizearticles, or call suggestrequery to get better queries, then searchnews again if you want broader coverage."
+            observation += "\nArticles found. NEXT STEP: call summarizearticles."
         return observation
 
     if tool_name == "summarizearticles":
@@ -241,7 +249,8 @@ def _dispatch_tool(tool_name: str, tool_input: str, model: str, context: dict) -
         if not articles:
             return "No relevant articles available. Search first, or give a final answer that nothing was found."
 
-        summary = registry[tool_name].fn(query=query, articles=articles, model=model)
+        style = context.get("prompt_style", "structured")
+        summary = registry[tool_name].fn(query=query, articles=articles, model=model, style=style)
         context["last_summary"] = summary
         return summary
 
@@ -277,35 +286,120 @@ def run_react_loop(
         "",
         "Return the next step as JSON.",
     ]
-    context: dict = {"user_input": user_input}
+    context: dict = {"user_input": user_input, "prompt_style": prompt_style}
     trace_lines: list[str] = []
     tool_calls = 0
 
-    for _ in range(max_iterations):
-        prompt = "\n".join(history_parts)
+    threshold_news = max(2, int(max_iterations * 0.40))
+    threshold_summary = max(1, int(max_iterations * 0.25))
 
-        with _console.status(f"[cyan]{DECIDING_STATUS}[/cyan]", spinner="dots"):
-            raw_response = generate(
-                model=model,
-                prompt=prompt,
-                system=system_prompt,
-                temperature=temperature,
-                response_format=REACT_STEP_SCHEMA,
-            ).strip()
+    for iteration in range(max_iterations):
+        iterations_left = max_iterations - iteration
+        tools_left = iterations_left - 1 
+        searches_used = context.get("search_count", 0)
+        has_articles = bool(context.get("last_articles"))
+        has_summary = bool(context.get("last_summary"))
+        news_called = searches_used > 0
+        purify_count = context.get("purify_count", 0)
 
-        trace_lines.append(raw_response)
+        state_flags = (
+            f"news_called={'yes' if news_called else 'no'} | "
+            f"summary_ready={'yes' if has_summary else 'no'} | "
+            f"articles_held={len(context.get('last_articles', []))}"
+        )
+        budget_line = (
+            f"[Turn {iteration + 1}/{max_iterations} | Tools left after this: {tools_left} | "
+            f"Searches: {searches_used}/{MAX_SEARCHES} | {state_flags}]"
+        )
 
-        try:
-            step = parse_step(raw_response)
-        except (json.JSONDecodeError, ValidationError, ValueError) as e:
-            observation = f"Invalid structured output: {str(e)}"
-            history_parts.append(f"Observation: {observation}")
-            trace_lines.append(f"Observation: {observation}")
-            continue
+        urgency_parts = []
+        if not news_called and tools_left <= threshold_news:
+            urgency_parts.append(
+                f"RECOMMEND: only {tools_left} tool call(s) remaining and no search done yet — call searchnews soon."
+            )
+        if has_articles and not has_summary and tools_left <= threshold_summary:
+            urgency_parts.append(
+                f"RECOMMEND: only {tools_left} tool call(s) remaining with articles in hand — call summarizearticles soon."
+            )
+        if not news_called and tools_left <= 2:
+            urgency_parts.append(
+                f"DEMAND: {tools_left} tools left, still no articles fetched — you MUST call searchnews RIGHT NOW."
+            )
+        if has_articles and not has_summary and tools_left <= 1:
+            urgency_parts.append(
+                "DEMAND: 1 tool call left and articles are ready — you MUST call summarizearticles RIGHT NOW."
+            )
+
+        if urgency_parts:
+            budget_line += "\n[" + " | ".join(urgency_parts) + "]"
+
+        prompt = budget_line + "\n\n" + "\n".join(history_parts)
+
+        if iterations_left <= 2:
+            prompt += f"\n\n[URGENT: Only {iterations_left} turn(s) left. You MUST return kind='final' now.]"
+
+        forced_step: ReActStep | None = None
+        if not news_called and tools_left <= 2 and purify_count >= 1:
+            purified = context.get("last_purified_queries", [user_input])
+            query_str = json.dumps({"q": purified[:2]})
+            forced_step = ReActStep(
+                kind="action",
+                thought="[override] tools_left critical and query already purified — forcing searchnews",
+                tool_name="searchnews",
+                tool_input=query_str,
+                final_answer="",
+            )
+            trace_lines.append(f"[OVERRIDE] forced searchnews: {query_str}")
+        elif has_articles and not has_summary and tools_left <= 1:
+            forced_step = ReActStep(
+                kind="action",
+                thought="[override] 1 tool left with articles in hand — forcing summarizearticles",
+                tool_name="summarizearticles",
+                tool_input=user_input,
+                final_answer="",
+            )
+            trace_lines.append("[OVERRIDE] forced summarizearticles")
+
+        if forced_step:
+            step = forced_step
+        else:
+            with _console.status(f"[cyan]{DECIDING_STATUS}[/cyan]", spinner="dots"):
+                raw_response = generate(
+                    model=model,
+                    prompt=prompt,
+                    system=system_prompt,
+                    temperature=temperature,
+                    response_format=REACT_STEP_SCHEMA,
+                ).strip()
+
+            trace_lines.append(raw_response)
+
+            try:
+                step = parse_step(raw_response)
+            except (json.JSONDecodeError, ValidationError, ValueError) as e:
+                observation = f"Invalid structured output: {str(e)}"
+                history_parts.append(f"Observation: {observation}")
+                trace_lines.append(f"Observation: {observation}")
+                continue
 
         if step.kind == "final":
             return ReActResult(
                 final_answer=step.final_answer.strip() or "I could not generate a useful final answer.",
+                trace="\n".join(trace_lines),
+                tool_calls=tool_calls,
+            )
+
+        if iterations_left <= 1:
+            if context.get("last_summary"):
+                fallback = context["last_summary"]
+            elif context.get("last_articles"):
+                with _console.status(f"[cyan]{tool_status('summarizearticles')}[/cyan]", spinner="dots"):
+                    fallback = call_tool("summarizearticles", user_input, model, context)
+                tool_calls += 1
+            else:
+                fallback = "I could not complete the research in time."
+            return ReActResult(
+                final_answer=fallback.strip() if fallback else "I could not generate a useful final answer.",
                 trace="\n".join(trace_lines),
                 tool_calls=tool_calls,
             )
@@ -324,14 +418,18 @@ def run_react_loop(
         history_parts.append(f"Observation: {observation}")
         trace_lines.append(f"Observation: {observation}")
 
-    raw_final = context.get("last_summary")
-    if raw_final:
-        fallback = raw_final
+
+    if context.get("last_summary"):
+        fallback = context["last_summary"]
+    elif context.get("last_articles"):
+        with _console.status(f"[cyan]{tool_status('summarizearticles')}[/cyan]", spinner="dots"):
+            fallback = call_tool("summarizearticles", user_input, model, context)
+        tool_calls += 1
     else:
         fallback = "I could not complete the loop within the maximum number of iterations."
 
     return ReActResult(
-        final_answer=fallback,
+        final_answer=fallback.strip() if fallback else "I could not generate a useful final answer.",
         trace="\n".join(trace_lines),
         tool_calls=tool_calls,
     )
