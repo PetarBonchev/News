@@ -5,6 +5,8 @@ hypothetical answer, and decides which to keep. HyDE lives here, not in the agen
 loop — the loop just asks "which of these articles are relevant?".
 """
 
+from news_agent.debug_log import debug
+
 from news_agent.tools.hyde import hypothetical_answer
 from news_agent.tools.relevance import (
     assess_coverage,
@@ -26,6 +28,7 @@ def filter_articles(
         return [], [], "none"
 
     hyde_text = hypothetical_answer(query, model=model)
+    debug("Hypotetical answer to score against", hyde_text)
     scores = score_articles(query, articles, hyde_text=hyde_text)
     relevant, dropped = select_relevant(articles, scores)
     coverage = assess_coverage(scores)

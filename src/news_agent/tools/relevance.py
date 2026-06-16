@@ -18,9 +18,9 @@ _console = Console()
 MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L12-v2"
 BODY_CHARS = 3000
 
-GOOD_THRESHOLD = 0.2
-PARTIAL_THRESHOLD = 0.1
-KEEP_THRESHOLD = 0.1
+GOOD_THRESHOLD = 0.35
+PARTIAL_THRESHOLD = 0.25
+KEEP_THRESHOLD = 0.25
 
 _model: CrossEncoder | None = None
 
